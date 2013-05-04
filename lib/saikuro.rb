@@ -1,14 +1,7 @@
 require "saikuro/version"
 
-require "saikuro/html_style_sheet"
-
-require "saikuro/result_index_generator"
-
 require "saikuro/base_formater"
-require "saikuro/token_counter_formater"
 require "saikuro/parse_state_formater"
-require "saikuro/html_token_counter_formater"
-require "saikuro/state_html_complexity_formater"
 
 require "saikuro/cli"
 
@@ -16,84 +9,6 @@ require 'irb/ruby-lex'
 require 'yaml'
 
 module Saikuro
-end
-
-#Returns the path without the file
-def seperate_file_from_path(path)
-  res = path.split("/")
-  if res.size == 1
-    ""
-  else
-    res[0..res.size - 2].join("/")
-  end
-end
-
-def get_ruby_files(path)
-  files = Array.new
-  Find.find(path) do |f|
-    if !FileTest.directory?(f)
-      if f =~ /rb$/
-        files<< f
-      end
-    end
-  end
-  files
-end
-
-# States to watch for
-# once in def get the token after space, because it may also
-# be something like + or << for operator overloading.
-
-# Counts the number of tokens in each line.
-class TokenCounter
-  include RubyToken
-
-  attr_reader :current_file
-
-  def initialize
-    @files = Hash.new
-    @tokens_per_line = Hash.new(0)
-    @current_file = ""
-  end
-
-  # Mark file to associate with the token count.
-  def set_current_file(file)
-    @current_file = file
-    @tokens_per_line = Hash.new(0)
-    @files[@current_file] = @tokens_per_line
-  end
-
-  # Iterate through all tracked files, passing the
-  # the provided formater the token counts.
-  def list_tokens_per_line(formater)
-    formater.start_count(@files.size)
-    @files.each do |fname, tok_per_line|
-      formater.start_file(fname)
-      tok_per_line.sort.each do |line,num|
-  formater.line_token_count(line,num)
-      end
-      formater.end_file
-    end
-  end
-
-  # Count the token for the passed line.
-  def count_token(line_no,token)
-    case token
-    when TkSPACE, TkNL, TkRD_COMMENT
-      # Do not count these as tokens
-    when TkCOMMENT
-      # Ignore this only for comments in a statement?
-      # Ignore TkCOLON,TkCOLON2  and operators? like "." etc..
-    when TkRBRACK, TkRPAREN, TkRBRACE
-      # Ignore the closing of an array/index/hash/paren
-      # The opening is counted, but no more.
-      # Thus [], () {} is counted as 1 token not 2.
-    else
-      # may want to filter out comments...
-      @tokens_per_line[line_no] += 1
-    end
-  end
-
 end
 
 # Main class and structure used to compute the
@@ -107,14 +22,6 @@ class ParseState
     @@top_state = ParseState.new(nil)
     @@top_state.name = "__top__"
     @@top_state
-  end
-
-  @@token_counter = TokenCounter.new
-  def ParseState.set_token_counter(counter)
-    @@token_counter = counter
-  end
-  def ParseState.get_token_counter
-    @@token_counter
   end
 
   def initialize(lexer,parent=nil)
@@ -184,11 +91,6 @@ class ParseState
     formater.end_class_compute_state("")
   end
 
-  # Count the tokens parsed if true else ignore them.
-  def count_tokens?
-    true
-  end
-
   def parse
     while @run do
       tok = @lexer.token
@@ -201,7 +103,6 @@ class ParseState
       if $VERBOSE
         puts "DEBUG: #{@lexer.line_no} #{tok.class}:#{tok.name if tok.respond_to?(:name)}"
       end
-      @@token_counter.count_token(@lexer.line_no, tok) if count_tokens?
       parse_token(tok)
     end
   end
@@ -360,7 +261,7 @@ class ParseState
     when TkSYMBEG
       state = do_symbol_token(token)
     when TkError
-      STDOUT.puts "Lexer received an error for line #{@lexer.line_no} char #{@lexer.char_no}"
+      STDERR.puts "Lexer received an error for line #{@lexer.line_no} char #{@lexer.char_no}"
     else
       state = do_else_token(token)
     end
@@ -370,11 +271,11 @@ class ParseState
   def end_debug
     STDOUT.puts "got an end: #{@name} in #{self.class.name}" if $VERBOSE
     if @parent.nil?
-      STDOUT.puts "DEBUG: Line #{@lexer.line_no}"
-      STDOUT.puts "DEBUG: #{@name}; #{self.class}"
+      STDOUT.puts "DEBUG: Line #{@lexer.line_no}" if $VERBOSE
+      STDOUT.puts "DEBUG: #{@name}; #{self.class}" if $VERBOSE
       # to_yaml can cause an infinite loop?
-      #STDOUT.puts "TOP: #{@@top_state.to_yaml}"
-      #STDOUT.puts "TOP: #{@@top_state.inspect}"
+      #STDOUT.puts "TOP: #{@@top_state.to_yaml}" if $VERBOSE
+      #STDOUT.puts "TOP: #{@@top_state.inspect}" if $VERBOSE
 
       # This may not be an error?
       #exit 1
@@ -385,11 +286,6 @@ end
 
 # Read and consume tokens in comments until a new line.
 class ParseComment < ParseState
-
-  # While in a comment state do not count the tokens.
-  def count_tokens?
-    false
-  end
 
   def parse_token(token)
     if token.is_a?(TkNL)
@@ -499,10 +395,9 @@ class ParseDef < EndableParseState
   @name<< token.name.to_s
       rescue Exception => err
   #what is this?
-  STDOUT.puts @@token_counter.current_file
-  STDOUT.puts @name
-  STDOUT.puts token.inspect
-  STDOUT.puts err.message
+  STDERR.puts @name
+  STDERR.puts token.inspect
+  STDERR.puts err.message
   exit 1
       end
     end
@@ -516,7 +411,12 @@ class ParseDef < EndableParseState
   end
 
   def compute_state(formater)
-    formater.def_compute_state(@name, self.calc_complexity, self.calc_lines)
+    if @parent.nil? || @parent.name.nil? || @parent.name.empty?
+      name = @name
+    else
+      name = @parent.name + "::" + @name
+    end
+    formater.def_compute_state(name, self.calc_complexity, self.calc_lines)
     super(formater)
   end
 end
@@ -613,34 +513,21 @@ class Filter
 end
 
 module Saikuro
-  def Saikuro.analyze(files, state_formater, token_count_formater, output_dir)
+  def Saikuro.analyze(file, state_formater)
 
-    idx_states = Array.new
-    idx_tokens = Array.new
-
-    # parse each file
-    files.each do |file|
       begin
-        STDOUT.puts "Parsing #{file}"
         # create top state
         top = ParseState.make_top_state
         STDOUT.puts "TOP State made" if $VERBOSE
-        token_counter = TokenCounter.new
-        ParseState.set_token_counter(token_counter)
-        token_counter.set_current_file(file)
 
         STDOUT.puts "Setting up Lexer" if $VERBOSE
         lexer = RubyLex.new
         # Turn of this, because it aborts when a syntax error is found...
         lexer.exception_on_syntax_error = false
-        lexer.set_input(File.new(file,"r"))
+        lexer.set_input(file)
         top.lexer = lexer
         STDOUT.puts "Parsing" if $VERBOSE
         top.parse
-
-
-        fdir_path = seperate_file_from_path(file)
-        FileUtils.makedirs("#{output_dir}/#{fdir_path}")
 
         if state_formater
           # output results
@@ -649,48 +536,19 @@ module Saikuro
           top.compute_state(state_formater)
           state_formater.end
 
-          fname = "#{file}_cyclo.html"
-          puts "writing cyclomatic #{file}" if $VERBOSE
-          File.open("#{output_dir}/#{fname}","w") do |f|
-            f.write state_io.string
-          end
-          idx_states<< [
-            fname,
-            state_formater.warnings.dup,
-            state_formater.errors.dup,
-          ]
-        end
-
-        if token_count_formater
-          token_io = StringIO.new
-          token_count_formater.start(token_io)
-          token_counter.list_tokens_per_line(token_count_formater)
-          token_count_formater.end
-
-          fname = "#{file}_token.html"
-          puts "writing token #{file}" if $VERBOSE
-          File.open("#{output_dir}/#{fname}","w") do |f|
-            f.write token_io.string
-          end
-          idx_tokens<< [
-            fname,
-            token_count_formater.warnings.dup,
-            token_count_formater.errors.dup,
-          ]
+          STDOUT.puts state_io.string
         end
 
       rescue RubyLex::SyntaxError => synerr
-        STDOUT.puts "Lexer error for file #{file} on line #{lexer.line_no}"
-        STDOUT.puts "#{synerr.class.name} : #{synerr.message}"
+        STDERR.puts "Error while lexing file on line #{lexer.line_no}"
+        STDERR.puts "#{synerr.class.name} : #{synerr.message}"
       rescue StandardError => err
-        STDOUT.puts "Error while parsing file : #{file}"
-        STDOUT.puts err.class,err.message,err.backtrace.join("\n")
+        STDERR.puts "Error while parsing file"
+        STDERR.puts err.class,err.message,err.backtrace.join("\n")
       rescue Exception => ex
-        STDOUT.puts "Error while parsing file : #{file}"
-        STDOUT.puts ex.class,ex.message,ex.backtrace.join("\n")
+        STDERR.puts "Error while parsing file"
+        STDERR.puts ex.class,ex.message,ex.backtrace.join("\n")
       end
-    end
 
-    [idx_states, idx_tokens]
   end
 end
